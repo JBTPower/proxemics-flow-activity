@@ -376,7 +376,7 @@ def h_r1(url):
 def r1_live():
     df = store.answers("r1")
     st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r1_chart(df), use_container_width=True, theme=None)
+    st.altair_chart(charts.r1_chart(df), width="stretch", theme=None)
 
 
 def h_r2(url):
@@ -388,7 +388,7 @@ def h_r2(url):
 def r2_live():
     df = store.answers("r2")
     st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r2_chart(df), use_container_width=True, theme=None)
+    st.altair_chart(charts.r2_chart(df), width="stretch", theme=None)
 
 
 def h_r3(url):
@@ -437,7 +437,7 @@ def h_r4(url):
 def r4_live():
     df = store.answers("r4")
     st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r4_chart(df), use_container_width=True, theme=None)
+    st.altair_chart(charts.r4_chart(df), width="stretch", theme=None)
 
 
 def h_wrap(url):

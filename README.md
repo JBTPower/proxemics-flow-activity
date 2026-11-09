@@ -18,11 +18,14 @@ All texts are in `content.py`; edit them there. Lines the Flow group should chec
 
 ## Run locally
 
+Needs Python 3.11 or newer (Streamlit Cloud uses 3.14). With [uv](https://docs.astral.sh/uv/):
+
 ```bash
-pip install -r requirements.txt
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then set HOST_PASSWORD
-streamlit run app.py
+uv run --python 3.14 --with-requirements requirements.txt streamlit run app.py
 ```
+
+Or in any Python ≥ 3.11 environment: `pip install -r requirements.txt` and `streamlit run app.py`.
 
 - Student view: http://localhost:8501
 - Host view (projector): http://localhost:8501/?host=1, then enter the password
