@@ -1,15 +1,19 @@
 """Proxemics × Flow — live class activity (Theories in HCI, PLUS Salzburg, WiSe 26).
 
+6 groups · Join → 1 Feel it (experiment) → 2 See it → 3 Design it → 4 Judge it → Wrap-up.
 Participants:  open the app URL (QR code on the projector).
 Host:          open the app URL with  ?host=1  and enter the host password.
 Run locally:   streamlit run app.py
 """
 import html
 import io
+import json
 import os
 import time
 import uuid
+import zipfile
 
+import pandas as pd
 import streamlit as st
 
 IS_HOST_URL = "host" in st.query_params
@@ -20,8 +24,6 @@ st.set_page_config(page_title="Proxemics × Flow", page_icon=":material/groups:"
 import charts  # noqa: E402
 import content as C  # noqa: E402
 import store  # noqa: E402
-
-ZONE_HEX = {"Intimate": "#E2553B", "Personal": "#F2A33A", "Social": "#2A9D8F", "Public": "#3D5A98"}
 
 st.html("""
 <style>
@@ -35,10 +37,16 @@ st.html("""
   .timer {font-size:2.2rem; font-weight:700; font-variant-numeric:tabular-nums; color:#1C1B2E;}
   .timer.low {color:#E2553B;}
   .quote {font-size:1.05rem; padding:.4rem 0; border-bottom:1px solid #E6E7EE;}
+  .role {font-size:1.6rem; font-weight:800; margin:.2rem 0 .1rem 0;}
+  .dist {font-size:1.1rem; font-weight:700;}
 </style>
 """)
+ZONE_HEX = {"public": "#3D5A98", "social": "#2A9D8F", "personal": "#B86E06", "intimate": "#E2553B"}
 
 
+# =====================================================================
+# HELPERS
+# =====================================================================
 def esc(s):
     return html.escape(str(s or ""))
 
@@ -52,12 +60,23 @@ def phase():
     return p if p in C.PHASES else "lobby"
 
 
-def n_tables():
-    return int(store.get_state("tables", "6"))
+def trial():
+    try:
+        return min(max(int(store.get_state("trial", "1")), 1), C.N_TRIALS)
+    except ValueError:
+        return 1
 
 
-def table_scenario(table_no):
-    return C.R3_SCENARIOS[(int(table_no) - 1) % len(C.R3_SCENARIOS)]
+def n_groups():
+    return int(store.get_state("tables", str(C.N_GROUPS)))
+
+
+def scenario(group):
+    return C.SCENARIOS[(int(group) - 1) % len(C.SCENARIOS)]
+
+
+def distance(group, t):
+    return C.GROUP_ORDERS[((int(group) - 1) % len(C.GROUP_ORDERS)) + 1][t - 1]
 
 
 def timer_left():
@@ -79,7 +98,7 @@ def _secret(key):
 def join_url():
     url = store.get_state("join_url") or _secret("APP_URL")
     if url:
-        return url.strip()  # keep a trailing slash: Streamlit Cloud's direct route ".../~/+/" needs it
+        return url.strip()
     host = st.context.headers.get("host", "localhost:8501")
     scheme = "http" if host.startswith(("localhost", "127.", "192.168.", "10.")) else "https"
     return f"{scheme}://{host}"
@@ -95,6 +114,74 @@ def qr_png(url):
     buf = io.BytesIO()
     img.save(buf)  # PNG by default for both qrcode image backends
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------- groups & roles
+def live_roster():
+    df = store.participants().sort_values("joined")
+    out = {}
+    for _, r in df.iterrows():
+        out.setdefault(int(r["table_no"]), []).append(r["pid"])
+    return out
+
+
+def roster():
+    """Group membership frozen when step 1 starts (late joiners become observers)."""
+    snap = store.get_state("roster")
+    return {int(k): v for k, v in json.loads(snap).items()} if snap else live_roster()
+
+
+def snapshot_roster():
+    store.set_state("roster", json.dumps(live_roster()))
+
+
+def roles(group, t):
+    members = roster().get(int(group), [])
+    if not members:
+        return {}
+    n = len(members)
+    out = {pid: "observer" for pid in members}
+    out[members[(t - 1) % n]] = "worker"
+    if n >= 2:
+        out[members[t % n]] = "intruder"
+    return out
+
+
+def names():
+    df = store.participants()
+    return dict(zip(df["pid"], df["name"]))
+
+
+def experiment_frames():
+    """Long tables for the charts and the export: metrics (zone, metric, value) and reactions (zone, reaction)."""
+    ans = store.answers("exp")
+    grp = dict(zip(store.participants()["pid"], store.participants()["table_no"]))
+    skipped = set()
+    for _, a in ans.iterrows():
+        t, key = a["item"].split(":")
+        if key == "skip" and a["value"] == "1" and a["pid"] in grp:
+            skipped.add((int(grp[a["pid"]]), int(t[1:])))
+    met, rea = [], []
+    for _, a in ans.iterrows():
+        if a["pid"] not in grp:
+            continue
+        t, key = a["item"].split(":")
+        g, tt = int(grp[a["pid"]]), int(t[1:])
+        if (g, tt) in skipped or key == "skip":
+            continue
+        z = distance(g, tt)
+        if key == "react":
+            for r in [x for x in a["value"].split("|") if x]:
+                rea.append(dict(group=g, trial=tt, zone=z, reaction=r))
+        else:
+            met.append(dict(group=g, trial=tt, zone=z, metric=key, value=a["value"]))
+    return (pd.DataFrame(met, columns=["group", "trial", "zone", "metric", "value"]),
+            pd.DataFrame(rea, columns=["group", "trial", "zone", "reaction"]))
+
+
+def insight(group):
+    raw = store.get_state(f"insight_{group}")
+    return json.loads(raw) if raw else None
 
 
 # =====================================================================
@@ -114,34 +201,33 @@ def participant_view():
     if me is None:
         with st.form("join"):
             name = st.text_input("Nickname (optional)", max_chars=24, placeholder="e.g. Anna")
-            table = st.selectbox("Which table are you sitting at?", list(range(1, n_tables() + 1)),
-                                 format_func=lambda t: f"Table {t}")
+            group = st.selectbox("Which group are you in?", list(range(1, n_groups() + 1)),
+                                 format_func=lambda g: f"Group {g}")
             if st.form_submit_button("Join", type="primary", width="stretch"):
-                store.join(pid, name.strip() or f"Guest {pid[:3].upper()}", table)
+                store.join(pid, name.strip() or f"Guest {pid[:3].upper()}", group)
                 st.query_params["pid"] = pid
                 st.rerun()
         theory_cards()
         return
 
-    st.caption(f"You: **{me['name']}** · Table {me['table_no']}")
-    watch_phase(current)
+    st.caption(f"You: **{me['name']}** · Group {me['table_no']}")
+    watch_state((current, trial()))
     meta = C.PHASE_META[current]
     st.subheader(meta["title"])
     st.markdown(f'<p class="muted">{esc(meta["task"])}</p>', unsafe_allow_html=True)
-
-    {"lobby": p_lobby, "r1": p_r1, "r2": p_r2, "r3": p_r3, "r4": p_r4, "wrap": p_wrap}[current](pid, me)
+    {"lobby": p_lobby, "feel": p_feel, "see": p_see, "design": p_design, "judge": p_judge, "wrap": p_wrap}[current](pid, me)
 
 
 @st.fragment(run_every="3s")
-def watch_phase(seen):
-    """Polls the shared round; reloads the page when the host moves on. Also shows the timer."""
-    if phase() != seen:
+def watch_state(seen):
+    """Polls the shared step and trial; reloads the page when the hosts move on. Also shows the timer."""
+    if (phase(), trial()) != seen:
         st.rerun()
     left = timer_left()
     if left is not None and left > 0:
         st.markdown(f'<div class="muted">⏱ {fmt_left(left)} left</div>', unsafe_allow_html=True)
     elif left == 0:
-        st.markdown('<div class="muted">⏱ Time is up, finish your thought</div>', unsafe_allow_html=True)
+        st.markdown('<div class="muted">⏱ Time is up</div>', unsafe_allow_html=True)
 
 
 def theory_cards():
@@ -155,54 +241,79 @@ def theory_cards():
 
 
 def p_lobby(pid, me):
-    st.success("You're in. Look at the projector; the first round starts in a moment.", icon=":material/check_circle:")
+    st.success(f"You're in. Sit with group {me['table_no']} and look at the projector.", icon=":material/check_circle:")
     theory_cards()
 
 
-def p_r1(pid, me):
-    mine = store.my_answers("r1", pid)
-    for i, sc in enumerate(C.R1_SCENARIOS, 1):
-        with st.container(border=True):
-            st.markdown(f"**{i}.** {sc['text']}")
-            st.segmented_control(
-                "Your answer", C.R1_OPTIONS, key=f"r1_{sc['id']}", default=mine.get(sc["id"]),
-                label_visibility="collapsed", on_change=_save_seg, args=("r1", sc["id"], pid))
-    done = len(store.my_answers("r1", pid))
-    st.progress(done / len(C.R1_SCENARIOS), text=f"{done} of {len(C.R1_SCENARIOS)} answered · you can change answers any time")
-
-
-def _save_seg(round_id, item, pid):
-    val = st.session_state.get(f"{round_id}_{item}")
-    if val:
-        store.save_answer(round_id, item, pid, val)
-
-
-def p_r2(pid, me):
-    st.info(C.R2_CONTEXT, icon=":material/self_improvement:")
-    mine = store.my_answers("r2", pid)
-    with st.form("r2"):
-        vals = {}
-        for it in C.R2_ITEMS:
-            vals[it["id"]] = st.slider(f"{it['text']} · {it['zone'].lower()} zone, {it['dist']}", 0, 10,
-                                       int(mine.get(it["id"], 5)), key=f"r2_{it['id']}")
-        if st.form_submit_button("Submit my ratings", type="primary", width="stretch"):
+def p_feel(pid, me):
+    g, t = int(me["table_no"]), trial()
+    d = distance(g, t)
+    label, zone, intruder_text = C.DISTANCES[d]
+    r = roles(g, t).get(pid, "observer")
+    nm = names()
+    who = roles(g, t)
+    worker = next((nm.get(p, "?") for p, ro in who.items() if ro == "worker"), "–")
+    intruder = next((nm.get(p, "?") for p, ro in who.items() if ro == "intruder"), "a host")
+    st.markdown(f'<span class="dist" style="color:{ZONE_HEX[d]}">Trial {t} of {C.N_TRIALS} · {esc(label)} ({zone} zone)</span>',
+                unsafe_allow_html=True)
+    st.caption(f"Worker: {worker} · Intruder: {intruder}")
+    role_name, role_text = C.ROLE_TEXT[r]
+    st.markdown(f'<div class="role">You are the {role_name}</div>', unsafe_allow_html=True)
+    st.markdown(esc(intruder_text if r == "intruder" else role_text))
+    mine = store.my_answers("exp", pid)
+    key = f"t{t}:"
+    with st.form(f"exp_{t}"):
+        if r == "worker":
+            score = st.select_slider("How far did you get? (last number crossed out)", list(range(0, C.GRID_MAX + 1)),
+                                     value=int(mine.get(key + "score", 0)))
+            absorb = st.slider("How absorbed were you in the task?", 1, 7, int(mine.get(key + "absorb", 4)),
+                               help="1 = not at all, 7 = completely")
+            aware = st.slider("How aware were you of the intruder?", 1, 7, int(mine.get(key + "aware", 4)),
+                              help="1 = not at all, 7 = constantly")
+            skip = st.checkbox("We skipped this distance", value=mine.get(key + "skip") == "1")
+            vals = {"score": score, "absorb": absorb, "aware": aware, "skip": int(skip)}
+        elif r == "intruder":
+            comfort = st.slider("How comfortable were you at this distance?", 1, 7, int(mine.get(key + "comfort", 4)),
+                                help="1 = very uncomfortable, 7 = completely fine")
+            vals = {"comfort": comfort}
+        else:
+            prev = [x for x in mine.get(key + "react", "").split("|") if x]
+            picked = [rc for rc in C.REACTIONS if st.checkbox(rc, value=rc in prev, key=f"rc_{t}_{rc}")]
+            vals = {"react": "|".join(picked)}
+        if st.form_submit_button("Save", type="primary", width="stretch"):
             for k, v in vals.items():
-                store.save_answer("r2", k, pid, v)
-            st.toast("Saved. Watch the projector!", icon=":material/check:")
-    if mine:
-        st.caption("✓ Your ratings are in. You can change and resubmit them.")
+                store.save_answer("exp", key + k, pid, v)
+            st.toast("Saved. Wait for the next trial.", icon=":material/check:")
+    if any(k.startswith(key) for k in mine):
+        st.caption("✓ Saved for this trial. You can still change it.")
+    st.caption(C.OPT_OUT)
 
 
-def p_r3(pid, me):
-    sc = table_scenario(me["table_no"])
-    st.markdown(f"#### Table {me['table_no']}: {sc['name']}")
+def p_see(pid, me):
+    g = int(me["table_no"])
+    st.info("Look at the projector: the class results by distance.", icon=":material/bar_chart:")
+    for q in C.SEE_QUESTIONS:
+        st.markdown(f"- {esc(q)}")
+    cur = insight(g)
+    if cur:
+        st.caption(f"Saved by {cur['author']}. Anyone in your group can change it.")
+    with st.form("insight"):
+        txt = st.text_area(C.INSIGHT_PROMPT, value=(cur or {}).get("text", ""), max_chars=220)
+        if st.form_submit_button("Save our insight", type="primary", width="stretch") and txt.strip():
+            store.set_state(f"insight_{g}", json.dumps(dict(text=txt.strip(), author=me["name"], ts=time.time())))
+            st.toast("Saved!", icon=":material/check:")
+
+
+def p_design(pid, me):
+    g = int(me["table_no"])
+    sc = scenario(g)
+    st.markdown(f"#### Group {g}: {sc['name']}")
     st.markdown(f'<p class="muted">{esc(sc["prompt"])}</p>', unsafe_allow_html=True)
-    st.markdown("**Your mission:** a system that uses proxemic cues to protect or enable flow. "
-                "Then ask yourselves how it could be misused.")
-    existing = store.idea_for_table(me["table_no"]) or {}
+    st.markdown(f"**Your mission:** {C.DESIGN_MISSION}")
+    existing = store.idea_for_table(g) or {}
     if existing.get("title"):
-        when = time.strftime("%H:%M", time.localtime(existing["ts"]))
-        st.caption(f"Saved by {existing['author']} at {when}. Anyone at your table can edit it.")
+        st.caption(f"Saved by {existing['author']} at {time.strftime('%H:%M', time.localtime(existing['ts']))}. "
+                   "Anyone in your group can edit it.")
     with st.form("idea"):
         title = st.text_input("Name of your idea", value=existing.get("title", ""), max_chars=60)
         body = st.text_area("How does it work? (2–3 sentences)", value=existing.get("body", ""), max_chars=500)
@@ -215,47 +326,40 @@ def p_r3(pid, me):
             if not title.strip():
                 st.warning("Give your idea a name first.")
             else:
-                store.save_idea(me["table_no"], sc["name"], title.strip(), body.strip(), dims, flow,
-                                risk.strip(), me["name"])
+                store.save_idea(g, sc["name"], title.strip(), body.strip(), dims, flow, risk.strip(), me["name"])
                 st.toast("Idea saved to the wall!", icon=":material/check:")
 
 
-def p_r4(pid, me):
-    mine = store.my_answers("r4", pid)
-    with st.form("r4"):
-        vals = {}
-        for stt in C.R4_STATEMENTS:
-            st.markdown(f"**“{stt['text']}”**")
-            vals[stt["id"]] = st.select_slider(stt["short"], C.LIKERT, value=mine.get(stt["id"], "Neutral"),
-                                               key=f"r4_{stt['id']}", label_visibility="collapsed")
-        if st.form_submit_button("Submit", type="primary", width="stretch"):
-            for k, v in vals.items():
-                store.save_answer("r4", k, pid, v)
-            st.toast("Saved. Be ready to defend your position!", icon=":material/check:")
-    if mine:
-        st.caption("✓ Your answers are in. You can change and resubmit them.")
+def p_judge(pid, me):
+    g = int(me["table_no"])
+    df = store.ideas()
+    others = df[df["table_no"] != g]
+    if others.empty:
+        st.caption("No ideas from other groups yet.")
+        return
+    for _, row in others.iterrows():
+        with st.container(border=True):
+            st.markdown(f"**Group {int(row['table_no'])} · {esc(row['title'])}**  \n"
+                        f"<span class='muted'>{esc(row['body'])}</span>", unsafe_allow_html=True)
+            if row["risk"]:
+                st.caption(f"Dark side (their view): {row['risk']}")
+    mine = store.my_answers("judge", pid)
+    opts = [int(x) for x in others["table_no"].tolist()]
+    fmt = lambda x: f"Group {x}"
+    with st.form("judge"):
+        best = st.radio(C.JUDGE_BEST, opts, format_func=fmt, horizontal=True,
+                        index=opts.index(int(mine["best"])) if mine.get("best") and int(mine["best"]) in opts else None)
+        dark = st.radio(C.JUDGE_DARK, opts, format_func=fmt, horizontal=True,
+                        index=opts.index(int(mine["dark"])) if mine.get("dark") and int(mine["dark"]) in opts else None)
+        if st.form_submit_button("Vote", type="primary", width="stretch"):
+            for k, v in (("best", best), ("dark", dark)):
+                if v is not None:
+                    store.save_answer("judge", k, pid, v)
+            st.toast("Thanks for voting!", icon=":material/check:")
 
 
 def p_wrap(pid, me):
-    df = store.ideas()
-    liked = store.my_likes(pid)
-    st.markdown(f"**Like up to {C.MAX_LIKES} ideas** from other tables ({len(liked)}/{C.MAX_LIKES} used)")
-    for _, row in df.iterrows():
-        if int(row["table_no"]) == int(me["table_no"]):
-            continue
-        with st.container(border=True):
-            st.markdown(f"**{esc(row['title'])}** · <span class='muted'>Table {int(row['table_no'])}, "
-                        f"{esc(row['scenario'])}</span>", unsafe_allow_html=True)
-            st.markdown(f"<span class='muted'>{esc(row['body'])}</span>", unsafe_allow_html=True)
-            on = int(row["table_no"]) in liked
-            if st.button(("♥ Liked" if on else "♡ Like") + f" · {int(row['likes'])}", key=f"like_{row['table_no']}",
-                         type="primary" if on else "secondary"):
-                if not store.toggle_like(pid, int(row["table_no"]), C.MAX_LIKES):
-                    st.toast(f"You can like at most {C.MAX_LIKES} ideas. Unlike one first.")
-                st.rerun()
-    if df.empty:
-        st.caption("No ideas on the wall yet.")
-    st.divider()
+    st.info("Look at the projector for the results.", icon=":material/emoji_events:")
     with st.form("exit"):
         txt = st.text_input(C.EXIT_PROMPT, max_chars=200)
         if st.form_submit_button("Send", type="primary", width="stretch") and txt.strip():
@@ -277,7 +381,7 @@ def host_view():
             else:
                 st.error("Wrong password.")
         if host_password() == "proxemics":
-            st.caption("Default password in use. Set HOST_PASSWORD in .streamlit/secrets.toml before class.")
+            st.caption("Default password in use. Set HOST_PASSWORD in the app's secrets before class.")
         return
 
     url = join_url()
@@ -288,13 +392,13 @@ def host_view():
         sidebar_live()
         with st.expander("Settings"):
             new_url = st.text_input("Join URL shown in the QR code", value=url)
-            tables = st.number_input("Number of tables", 1, 12, n_tables())
+            groups = st.number_input("Number of groups", 1, 12, n_groups())
             if st.button("Save settings"):
                 store.set_state("join_url", new_url.strip())
-                store.set_state("tables", int(tables))
+                store.set_state("tables", int(groups))
                 st.rerun()
         with st.expander("Results & reset"):
-            st.download_button("Download all results (CSV zip)", store.export_zip(),
+            st.download_button("Download all results (CSV zip)", export_zip(),
                                file_name=f"proxemics_flow_results_{time.strftime('%Y%m%d_%H%M')}.zip",
                                mime="application/zip", width="stretch")
             confirm = st.text_input("Type RESET to delete all data")
@@ -304,11 +408,14 @@ def host_view():
 
     current = phase()
     labels = {p: C.PHASE_META[p]["label"] for p in C.PHASES}
-    pick = st.segmented_control("Round", C.PHASES, format_func=labels.get, default=current, key="phase_ctl",
+    pick = st.segmented_control("Step", C.PHASES, format_func=labels.get, default=current, key="phase_ctl",
                                 label_visibility="collapsed")
     if pick and pick != current:
         store.set_state("phase", pick)
         store.set_state("timer_end", 0)
+        if pick == "feel" and not store.get_state("roster"):
+            snapshot_roster()
+            store.set_state("trial", 1)
         st.rerun()
 
     meta = C.PHASE_META[current]
@@ -318,25 +425,35 @@ def host_view():
         st.header(meta["title"], anchor=False)
         st.markdown(f'<p class="bigtask">{esc(meta["task"])}</p>', unsafe_allow_html=True)
     with right_col:
-        timer_widget(meta["minutes"])
+        timer_widget(C.TRIAL_SECONDS / 60 if current == "feel" else meta["minutes"])
+    {"lobby": h_lobby, "feel": h_feel, "see": h_see, "design": h_design, "judge": h_judge, "wrap": h_wrap}[current](url)
 
-    {"lobby": h_lobby, "r1": h_r1, "r2": h_r2, "r3": h_r3, "r4": h_r4, "wrap": h_wrap}[current](url)
+
+def export_zip():
+    met, rea = experiment_frames()
+    buf = io.BytesIO(store.export_zip())
+    with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("experiment_metrics.csv", met.to_csv(index=False))
+        z.writestr("experiment_reactions.csv", rea.to_csv(index=False))
+        z.writestr("insights.csv", pd.DataFrame([dict(group=g, **(insight(g) or {})) for g in range(1, n_groups() + 1)])
+                   .to_csv(index=False))
+    return buf.getvalue()
 
 
 @st.fragment(run_every="3s")
 def sidebar_live():
-    df = store.participants()
-    st.metric("People joined", len(df))
+    st.metric("People joined", len(store.participants()))
 
 
 @st.fragment(run_every="1s")
 def timer_widget(default_min):
     left = timer_left()
     if left is not None:
-        cls = "timer low" if left <= 30 else "timer"
+        cls = "timer low" if left <= 10 else "timer"
         st.markdown(f'<div class="{cls}">{fmt_left(left)}</div>', unsafe_allow_html=True)
+    label = f"{int(default_min * 60)} s" if default_min < 1 else f"{int(default_min)} min"
     c1, c2, c3 = st.columns(3)
-    if c1.button(f"{default_min} min", help="Start the suggested time for this round", width="stretch"):
+    if c1.button(label, help="Start the suggested time", width="stretch"):
         store.set_state("timer_end", time.time() + 60 * default_min)
         st.rerun(scope="fragment")
     if c2.button("+1", help="Add one minute", width="stretch"):
@@ -361,94 +478,149 @@ def h_lobby(url):
 def lobby_live():
     df = store.participants()
     st.metric("People joined", len(df))
-    if len(df):
-        st.markdown(chips(df["name"].tolist()[-60:]), unsafe_allow_html=True)
+    for g in range(1, n_groups() + 1):
+        members = df[df["table_no"] == g]["name"].tolist()
+        st.markdown(f"**Group {g}** ({len(members)}) " + chips(members), unsafe_allow_html=True)
 
 
-def h_r1(url):
-    r1_live()
-    if st.toggle("Reveal our take", key="reveal_r1"):
-        for i, sc in enumerate(C.R1_SCENARIOS, 1):
-            st.markdown(f"**{i} · {esc(sc['short'])} → {sc['answer']}**: <span class='muted'>{esc(sc['why'])}</span>",
-                        unsafe_allow_html=True)
+def h_feel(url):
+    t = trial()
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    with c1:
+        pick = st.segmented_control("Trial", list(range(1, C.N_TRIALS + 1)), default=t, key="trial_ctl",
+                                    format_func=lambda x: f"Trial {x}", label_visibility="collapsed")
+        if pick and pick != t:
+            store.set_state("trial", pick)
+            store.set_state("timer_end", 0)
+            st.rerun()
+    with c2:
+        if st.button("Refresh groups", help="Re-read group membership (use if people joined late)"):
+            snapshot_roster()
+            st.rerun()
+    st.markdown(f"**Trial {t}:** workers take **sheet {t}**, intruders go to the distance shown on their phone. "
+                f"Start the {C.TRIAL_SECONDS} s timer when everyone is in place. {esc(C.OPT_OUT)}")
+    feel_progress(t)
 
 
 @st.fragment(run_every="3s")
-def r1_live():
-    df = store.answers("r1")
-    st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r1_chart(df), width="stretch", theme=None)
+def feel_progress(t):
+    nm = names()
+    mine = store.answers("exp")
+    done = set(mine[mine["item"].str.startswith(f"t{t}:")]["pid"]) if len(mine) else set()
+    rows = []
+    for g in range(1, n_groups() + 1):
+        ro = roles(g, t)
+        if not ro:
+            continue
+        d = distance(g, t)
+        w = next((p for p, r in ro.items() if r == "worker"), None)
+        i = next((p for p, r in ro.items() if r == "intruder"), None)
+        obs = [p for p, r in ro.items() if r == "observer"]
+        rows.append({"Group": g, "Distance": C.DISTANCES[d][0], "Worker": nm.get(w, "–") + (" ✓" if w in done else ""),
+                     "Intruder": (nm.get(i, "–") + (" ✓" if i in done else "")) if i else "host",
+                     "Observers saved": f"{sum(p in done for p in obs)}/{len(obs)}"})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    else:
+        st.info("Nobody has joined a group yet.")
 
 
-def h_r2(url):
-    r2_live()
-    st.markdown(f"**Discuss:** {esc(C.R2_DISCUSS)}")
+def h_see(url):
+    see_live()
+    st.markdown("**Discuss:** " + " · ".join(esc(q) for q in C.SEE_QUESTIONS))
+    insights_live()
 
 
 @st.fragment(run_every="3s")
-def r2_live():
-    df = store.answers("r2")
-    st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r2_chart(df), width="stretch", theme=None)
+def see_live():
+    met, rea = experiment_frames()
+    n_trials = len(met[met["metric"] == "score"])
+    st.caption(f"{n_trials} worker trials · {len(rea)} observed reactions (skipped trials left out)")
+    st.altair_chart(charts.zone_metrics(met), width="stretch", theme=None)
+    st.altair_chart(charts.reactions_grid(rea), width="stretch", theme=None)
 
 
-def h_r3(url):
-    with st.expander("Table settings", expanded=False):
+@st.fragment(run_every="3s")
+def insights_live():
+    items = [(g, insight(g)) for g in range(1, n_groups() + 1)]
+    items = [(g, i) for g, i in items if i]
+    if items:
+        st.markdown("#### Group insights")
+        for g, i in items:
+            st.markdown(f"<div class='quote'><b>Group {g}:</b> “{esc(i['text'])}”</div>", unsafe_allow_html=True)
+
+
+def h_design(url):
+    with st.expander("Group settings", expanded=False):
         cols = st.columns(3)
-        for t in range(1, n_tables() + 1):
-            sc = table_scenario(t)
-            cols[(t - 1) % 3].markdown(f"**Table {t}:** {esc(sc['name'])}")
+        for g in range(1, n_groups() + 1):
+            cols[(g - 1) % 3].markdown(f"**Group {g}:** {esc(scenario(g)['name'])}")
     st.markdown(chips([f"Dimensions: {', '.join(C.DIMENSIONS)}"], "dim") +
                 chips([f"Flow conditions: {', '.join(C.FLOW_CONDITIONS)}"], "flow"), unsafe_allow_html=True)
     idea_wall(moderate=True)
 
 
 @st.fragment(run_every="3s")
-def idea_wall(moderate=False, sort_by_likes=False):
+def idea_wall(moderate=False):
     df = store.ideas()
     if df.empty:
-        st.info("The idea wall fills up as soon as the first table saves its idea.")
+        st.info("The idea wall fills up as soon as the first group saves its idea.")
         return
-    if sort_by_likes:
-        df = df.sort_values("likes", ascending=False)
     cols = st.columns(3)
     for k, (_, row) in enumerate(df.iterrows()):
         with cols[k % 3].container(border=True):
-            st.markdown(f"<div class='kicker' style='color:#5F6178'>Table {int(row['table_no'])} · {esc(row['scenario'])}</div>"
-                        f"<h4 style='margin:.2rem 0'>{esc(row['title'])}</h4>"
-                        f"<p>{esc(row['body'])}</p>"
+            st.markdown(f"<div class='kicker' style='color:#5F6178'>Group {int(row['table_no'])} · {esc(row['scenario'])}</div>"
+                        f"<h4 style='margin:.2rem 0'>{esc(row['title'])}</h4><p>{esc(row['body'])}</p>"
                         f"{chips([d for d in (row['dims'] or '').split('|')], 'dim')}"
                         f"{chips([f for f in (row['flow'] or '').split('|')], 'flow')}"
                         + (f"<p class='muted' style='margin-top:.5rem'><b>Dark side:</b> {esc(row['risk'])}</p>"
-                           if row["risk"] else "")
-                        + f"<p style='margin:0'><b>♥ {int(row['likes'])}</b></p>", unsafe_allow_html=True)
+                           if row["risk"] else ""), unsafe_allow_html=True)
             if moderate and st.button("Hide", key=f"hide_{row['table_no']}", help="Remove from the wall"):
                 store.hide_idea(int(row["table_no"]))
                 st.rerun(scope="fragment")
 
 
-def h_r4(url):
-    for i, stt in enumerate(C.R4_STATEMENTS, 1):
-        st.markdown(f"**{i}. {esc(stt['short'])}:** “{esc(stt['text'])}”")
-    r4_live()
-    st.markdown("**Debate:** one person from each end of the scale gets 30 seconds.")
+def h_judge(url):
+    show = st.toggle("Show votes", key="show_votes", help="Keep hidden while people vote, to avoid bandwagon effects")
+    judge_live(show)
 
 
 @st.fragment(run_every="3s")
-def r4_live():
-    df = store.answers("r4")
-    st.caption(f"{df['pid'].nunique()} people answered")
-    st.altair_chart(charts.r4_chart(df), width="stretch", theme=None)
+def judge_live(show):
+    v = store.answers("judge")
+    st.caption(f"{v['pid'].nunique() if len(v) else 0} people voted")
+    groups = [int(x) for x in store.ideas()["table_no"].tolist()]
+    if show and groups:
+        st.altair_chart(charts.votes(v, groups), width="stretch", theme=None)
+    elif not show:
+        idea_wall()
 
 
 def h_wrap(url):
-    c1, c2 = st.columns([1.6, 1])
-    with c1:
-        st.markdown("#### Most liked ideas")
-        idea_wall(sort_by_likes=True)
-    with c2:
-        st.markdown(f"#### {esc(C.EXIT_PROMPT)}")
-        exit_live()
+    v = store.answers("judge")
+    ideas = store.ideas().set_index("table_no")
+    met, _ = experiment_frames()
+    c1, c2, c3 = st.columns(3)
+    for col, (item, title) in zip((c1, c2), (("best", C.JUDGE_BEST), ("dark", C.JUDGE_DARK))):
+        with col:
+            st.markdown(f"#### {title}")
+            sub = v[v["item"] == item]["value"].value_counts()
+            if len(sub) and int(sub.index[0]) in ideas.index:
+                g = int(sub.index[0]); row = ideas.loc[g]
+                st.markdown(f"**Group {g} · {esc(row['title'])}** ({int(sub.iloc[0])} votes)  \n{esc(row['body'])}")
+            else:
+                st.caption("No votes yet.")
+    with c3:
+        st.markdown("#### What we measured")
+        for key, label in (("score", "Numbers found"), ("absorb", "Absorption")):
+            sub = met[met["metric"] == key]
+            far = pd.to_numeric(sub[sub["zone"] == "public"]["value"]).mean()
+            near = pd.to_numeric(sub[sub["zone"] == "intimate"]["value"]).mean()
+            if pd.notna(far) and pd.notna(near):
+                st.markdown(f"**{label}:** {far:.1f} far away → {near:.1f} over the shoulder")
+    insights_live()
+    st.markdown(f"#### {esc(C.EXIT_PROMPT)}")
+    exit_live()
 
 
 @st.fragment(run_every="3s")
@@ -456,7 +628,7 @@ def exit_live():
     df = store.exits()
     if df.empty:
         st.caption("Waiting for the first sentences…")
-    for _, row in df.head(25).iterrows():
+    for _, row in df.head(20).iterrows():
         c1, c2 = st.columns([8, 1])
         c1.markdown(f"<div class='quote'>“{esc(row['text'])}”</div>", unsafe_allow_html=True)
         if c2.button("✕", key=f"hx_{row['pid']}", help="Hide"):
