@@ -42,13 +42,15 @@ Locally, other devices can only join if they are on the same network and the net
    - Secrets:
      ```toml
      HOST_PASSWORD = "your-password"
-     APP_URL = "https://proxemics-flow-activity.streamlit.app"
+     APP_URL = "https://proxemics-flow-activity.streamlit.app/~/+/"
      ```
+     The `/~/+/` address (with the trailing slash) opens the app directly, without Streamlit's sign-in wrapper,
+     so it also works in browsers that block cross-site cookies (Safari, ad blockers). The QR code uses it.
 5. **Deploy**, wait 2–3 minutes.
 6. **Make it public:** if the GitHub repo is private, the app is private too and students see a login page. Open the app → **Share** → allow anyone with the link, or make the repo public (nothing secret is in it).
-7. Open `https://<your-app>.streamlit.app/?host=1` on the presenter laptop.
+7. Open `https://<your-app>.streamlit.app/~/+/?host=1` on the presenter laptop.
 
-**If a page stays blank:** open `https://<your-app>.streamlit.app/?diag=1`. It shows the Python and package versions and runs a database write test. Also check **Manage app** (bottom right) → logs.
+**If a page stays blank:** open `https://<your-app>.streamlit.app/~/+/?diag=1`. It shows the Python and package versions and runs a database write test. Also check **Manage app** (bottom right) → logs.
 
 ## Runbook for the session
 

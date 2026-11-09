@@ -79,7 +79,7 @@ def _secret(key):
 def join_url():
     url = store.get_state("join_url") or _secret("APP_URL")
     if url:
-        return url.rstrip("/")
+        return url.strip()  # keep a trailing slash: Streamlit Cloud's direct route ".../~/+/" needs it
     host = st.context.headers.get("host", "localhost:8501")
     scheme = "http" if host.startswith(("localhost", "127.", "192.168.", "10.")) else "https"
     return f"{scheme}://{host}"
