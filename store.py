@@ -8,6 +8,7 @@ export the results (host sidebar) before you close the app.
 import io
 import os
 import sqlite3
+import tempfile
 import threading
 import time
 import zipfile
@@ -16,7 +17,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-DB_PATH = os.environ.get("ACTIVITY_DB", str(Path(__file__).parent / "data" / "activity.db"))
+# The system temp folder is always local, writable disk (also on Streamlit Cloud, where the
+# repo folder is a special mount). Override with the ACTIVITY_DB environment variable.
+DB_PATH = os.environ.get("ACTIVITY_DB", str(Path(tempfile.gettempdir()) / "proxemics_flow_activity.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
@@ -33,8 +36,8 @@ CREATE TABLE IF NOT EXISTS exits (pid TEXT PRIMARY KEY, text TEXT, ts REAL, hidd
 @st.cache_resource
 def _db():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    # default rollback journal (no WAL): WAL needs shared-memory support that some mounts lack
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     conn.commit()
     return conn, threading.Lock()
@@ -159,6 +162,14 @@ def hide_exit(pid):
 
 
 # ---------------------------------------------------------------- admin
+def selftest():
+    """Write and read back one value; used by the ?diag=1 page."""
+    t0 = time.time()
+    set_state("_selftest", t0)
+    ok = get_state("_selftest") == str(t0)
+    return ok, round((time.time() - t0) * 1000, 1)
+
+
 def reset_all():
     conn, lock = _db()
     with lock:

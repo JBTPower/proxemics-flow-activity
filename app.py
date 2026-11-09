@@ -101,10 +101,10 @@ def qr_png(url):
 # PARTICIPANT
 # =====================================================================
 def participant_view():
-    pid = st.query_params.get("pid")
-    if not pid:
-        pid = uuid.uuid4().hex[:12]
-        st.query_params["pid"] = pid   # keeps the same identity if the page is reloaded
+    # Identity lives in the session; it is written to the URL only once, after joining,
+    # so a reload keeps the same person. Nothing touches the URL on the first visit.
+    pid = st.query_params.get("pid") or st.session_state.get("pid") or uuid.uuid4().hex[:12]
+    st.session_state["pid"] = pid
     me = store.get_participant(pid)
     current = phase()
 
@@ -118,6 +118,7 @@ def participant_view():
                                  format_func=lambda t: f"Table {t}")
             if st.form_submit_button("Join", type="primary", width="stretch"):
                 store.join(pid, name.strip() or f"Guest {pid[:3].upper()}", table)
+                st.query_params["pid"] = pid
                 st.rerun()
         theory_cards()
         return
@@ -464,7 +465,33 @@ def exit_live():
 
 
 # =====================================================================
-if IS_HOST_URL:
+# DIAGNOSIS  (open the app with ?diag=1 if something does not load)
+# =====================================================================
+def diag_view():
+    import platform
+    import sys
+    from importlib.metadata import version
+    st.title("Diagnosis")
+    rows = {"Python": sys.version.split()[0], "Platform": platform.platform(),
+            "Working directory": os.getcwd(), "Database file": store.DB_PATH}
+    for pkg in ("streamlit", "altair", "pandas", "qrcode"):
+        try:
+            rows[pkg] = version(pkg)
+        except Exception as exc:  # pragma: no cover
+            rows[pkg] = f"missing ({exc})"
+    try:
+        ok, ms = store.selftest()
+        rows["Database write test"] = f"{'OK' if ok else 'FAILED'} ({ms} ms)"
+    except Exception as exc:
+        rows["Database write test"] = f"ERROR: {exc!r}"
+    rows["Host password set"] = "yes" if _secret("HOST_PASSWORD") else "no (default in use)"
+    rows["Join URL"] = join_url()
+    st.table({"Check": list(rows), "Result": [str(v) for v in rows.values()]})
+
+
+if "diag" in st.query_params:
+    diag_view()
+elif IS_HOST_URL:
     host_view()
 else:
     participant_view()

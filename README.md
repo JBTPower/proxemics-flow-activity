@@ -34,14 +34,21 @@ Locally, other devices can only join if they are on the same network and the net
 
 ## Deploy for class (Streamlit Community Cloud, free)
 
-1. Create a GitHub repository (it can be private) and upload this folder. `secrets.toml` and `data/` are excluded by `.gitignore`.
-2. Go to https://share.streamlit.io, choose **Create app**, pick the repo, branch and `app.py`, and choose a short URL (e.g. `proxemics-flow`).
-3. Under **Advanced settings → Secrets**, paste:
-   ```toml
-   HOST_PASSWORD = "your-password"
-   APP_URL = "https://proxemics-flow.streamlit.app"
-   ```
-4. Open `https://<your-app>.streamlit.app/?host=1` on the presenter laptop.
+1. Push this folder to GitHub (done: `JBTPower/proxemics-flow-activity`). `secrets.toml` and `data/` are excluded by `.gitignore`.
+2. Go to https://share.streamlit.io → **Create app** → *Deploy a public app from GitHub*.
+3. Repository `JBTPower/proxemics-flow-activity`, branch `main`, main file `app.py`, App URL e.g. `proxemics-flow-activity`.
+4. **Advanced settings:**
+   - Python version: **3.12** (the app also runs on 3.14, but 3.12 is the safer choice on the cloud).
+   - Secrets:
+     ```toml
+     HOST_PASSWORD = "your-password"
+     APP_URL = "https://proxemics-flow-activity.streamlit.app"
+     ```
+5. **Deploy**, wait 2–3 minutes.
+6. **Make it public:** if the GitHub repo is private, the app is private too and students see a login page. Open the app → **Share** → allow anyone with the link, or make the repo public (nothing secret is in it).
+7. Open `https://<your-app>.streamlit.app/?host=1` on the presenter laptop.
+
+**If a page stays blank:** open `https://<your-app>.streamlit.app/?diag=1`. It shows the Python and package versions and runs a database write test. Also check **Manage app** (bottom right) → logs.
 
 ## Runbook for the session
 
